@@ -1,0 +1,519 @@
+---
+title: "Single Cell RNA-Seq study, for finding and characterizing cell subtypes"
+output:
+  html_document:
+    df_print: paged
+---
+
+##### ALI EHSANI, (matricula : 965407), MSc. students in Molecular Biotechnology and Bioinformatics(MBB)
+
+##### "Single Cell" RNA-Seq analysis
+
+Here is the report of transcriptomics project result which includes the Single Cell RNA-Seq analysis. The samples I worked with, is obtained from Left Ventricle of Heart tissue Mus musculus (Mm); The number of cells (with at least 1000 counted reads) in this project was 2730; Number of expressed genes was 24,878.
+
+Single cells were clustered based on gene expression.
+
+General description of this project, I have to deal with single-cell RNA-Seq data that come from the PanglaoDB. I worked on a dataset based on the 10X platform. I followed the steps of the **Seurat vignette** in this project.
+
+\* **dplyr** is a grammar of data manipulation, providing a consistent set of verbs that help you solve the most common data manipulation challenges. \* The goal of **patchwork** is to make it ridiculously simple to combine separate ggplots into the same graphic.
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(patchwork) 
+```
+
+For loading datasets we can retrieve the counts as a "Rdata" object, or as a compressed count matrix. I preferred first way.
+
+```{r}
+load('SRA637291_SRS2749416.sparse.RData')
+#OR
+#Read in the expression matrix
+#exp.mat <- read.table(file = "SRA637291_SRS2749416.mat.gz", header = T, as.is = TRUE, row.names = 1)
+```
+
+#### Pre-processing raw data:
+
+Each row contains gene symbol with ensembl. By using these commands I extracted ENSEMBL of my data:
+
+```{r}
+Ensembl= gsub(".*_", "", rownames(sm))
+Ensembl= gsub("\\..*", "", Ensembl)
+```
+
+Then I keep only the gene names of my data which are in rownames:
+
+```{r}
+rownames(sm) = gsub("\\_E.*", "", rownames(sm))
+```
+
+Here I showed some genes as an example. The dot values in the matrix represent no molecules detected. Most values in an scRNA-seq matrix are 0, Seurat uses a sparse-matrix representation whenever possible. This results in significant memory and speed savings for Drop-seq/inDrop/10x/"many cells few reads data.
+
+```{r}
+sm[c("Gsn", "Col1a2", "Acta1","Lgals3", "Fabp4", "Ckap4"), 1:30]
+```
+
+**Create our Seurat object**
+
+In the first step I used the "Rdata" object (count matrix) to create a seurat object. The object serves as a container that contains both data (count matrix) and analysis (PCA, or clustering results) for a single-cell dataset. The name of project is LVHEART \~ Left Ventricle of Heart. After running CreateSeuratObject() function we see that this dataset contains with 3978 samples.
+
+```{r}
+LVH = CreateSeuratObject(counts = sm, project = 'LVHeart', min.cells = 3, min.features = 200, names.delim = "_" )
+LVH
+```
+
+Then I extract mitochondial genes from data:
+
+```{r}
+mito_genes <- grep("^MT-|^mt-", rownames(LVH@assays$RNA@data), value = TRUE)
+```
+
+Then I tried to calculate mitochondrial QC matrices;
+
+We can calculate mitochondrial QC metrics with the PercentageFeatureSet function, which calculates the percentage of counts originating from a set of features. I use the set of all genes starting with mt- as a set of mitochondrial genes:
+
+```{r}
+LVH[["percent.mt"]] <- PercentageFeatureSet(LVH, pattern = "^mt-")
+head(LVH@meta.data)
+```
+
+Now, with percent.mt, I visualize QC matrices, using VlnPlot which shows violon plot:
+
+```{r}
+VlnPlot(LVH, features = c('nFeature_RNA', 'nCount_RNA', 'percent.mt'), ncol = 3, pt.size=0)
+```
+
+```{r}
+mean(LVH$nFeature_RNA)
+max(LVH$nFeature_RNA)
+min(LVH$nFeature_RNA)
+```
+
+Moreover, with FeatureScatter() function, I compared two different features together:
+
+```{r}
+plot1 = FeatureScatter(LVH, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 = FeatureScatter(LVH, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+By playing with numbers and the best choose of samples, I tried to extract suitable number of cells:
+
+```{r}
+summary(LVH$nFeature_RNA > 200)  
+summary(LVH$nFeature_RNA < 3700)      
+summary(LVH$percent.mt < 15 )            
+```
+
+I subset dataset with n_Feature_RNA higher than 200 and lower than 3700, and mitochondial percentage of less than 15 in each cell:
+
+I found that 106 samples are omitted now.
+
+```{r}
+LVH= subset(LVH, subset = nFeature_RNA < 3700 & nFeature_RNA > 200 & percent.mt < 15)
+LVH
+```
+
+#### Normalizing the data
+
+I normalize dataset using NormalizeData() function of Seurat package which is a global-scaling normalization method. (In this part I use 'LogNormalize' method and scale factor of 10000):
+
+```{r}
+LVH = NormalizeData(LVH, normalization.method = 'LogNormalize', scale.factor = 10000)
+```
+
+**Identification of highly variable features (feature selection)**
+
+To restrict the gene set to the "most variable" genes, I do this, which 'vst' method is used and 2000 variable features are obtained by default:
+
+```{r}
+LVH = FindVariableFeatures(LVH,selection.method = 'vst')
+```
+
+```{r}
+#10 most highly variable features are saved in top10
+top10=head(VariableFeatures(LVH), 10)
+top10
+```
+
+Then, I plot variable features with labels(top10 features):
+
+```{r}
+LabelPoints(plot = VariableFeaturePlot(LVH), points = top10, repel = T)
+```
+
+#### Scaling the data
+
+Apply a linear transformation ('scaling') that is a standard pre-processing step prior to dimensional reduction techniques like PCA.
+
+The ScaleData() function shifts the expression of each gene, so that the mean expression across cells is 0; furthermore, it scales the expression of each gene, so that the variance across cells is 1. (This step gives equal weight in downstream analyses, so that highly-expressed genes do not dominate)
+
+1.  Scale all genes:
+
+    This scaling step is mandatory in every processes
+
+    ```{r}
+    all.genes= rownames(LVH)
+    LVH= ScaleData(LVH, features = all.genes)
+    ```
+
+2.  Scale to mt genes:
+
+    we could use the ScaleData() function to remove unwanted sources of variation from a single-cell dataset.
+
+    We do 2nd or 3rd steps if we find mitochondrial or cell cycle related genes as marker in our data.
+
+
+    ```{r}
+    LVH = ScaleData(LVH, vars.to.regress = "percent.mt")
+
+    ```
+
+A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat. We can segregate this list into markers of G2/M phase and markers of S phase, but at first because I use mm genes, I have to change gene names from capital to short letters except first letter:
+
+```{r}
+cc.genes
+s.genes=stringr::str_to_title(cc.genes$s.genes)
+s.genes
+g2m.genes=stringr::str_to_title(cc.genes$g2m.genes)
+g2m.genes
+```
+
+Score cell cycle phases using CellCycleScoring() function
+
+```{r}
+LVH=CellCycleScoring(LVH,s.features = s.genes,g2m.features = g2m.genes,set.ident = T)
+head(LVH[[]])
+```
+
+3.  Scale to cc genes:
+
+    ```{r}
+    #LVH = ScaleData(LVH, vars.to.regress = c("S.Score", "G2M.Score"), features = rownames(LVH))
+    ```
+
+#### **Perform linear dimensional reduction**
+
+First of all I have to check that mt genes or cell cycle genes are not in my data;
+
+\* By doing this plot, I found that no mt or cc genes are in my data. Because when we run a PCA on cell cycle genes, it reveals tha cells do not separate entirely by phase. It approved that my dataset does not need any regression out of mitochondrial or cell cycle genes
+
+```{r}
+LVH= RunPCA(LVH,features = c(s.genes,g2m.genes))
+DimPlot(LVH)
+```
+
+perform **PCA** on the scaled data:
+
+By default, only the previously determined variable features are used as input, but we can use "features" argument if we wish to choose a different subset.
+
+```{r}
+LVH= RunPCA(LVH,features = VariableFeatures(object = LVH))
+```
+
+Seurat provides several useful ways of **visualizing** both cells and features that define the PCA, including VizDimReduction(), DimPlot(), and DimHeatmap()
+
+Examine and visualize PCA results in different ways:
+
+```{r}
+print(LVH[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r}
+#plot data on first and second PCA dimensions:
+VizDimLoadings(LVH,dims = 1:2, reduction = 'pca')
+```
+
+```{r}
+#Also we can use the 'reduction' argument showing what dimensional reduction we use:
+DimPlot(LVH, reduction = 'pca')
+```
+
+```{r}
+#We can plot data projected on any of the PCA dimensions:
+DimPlot(LVH, reduction = "pca", dims = c(3,4))
+```
+
+DimHeatmap() allows for easy exploration of the primary sources of heterogeneity in a dataset, and can be useful when trying to decide which PCs to include for further downstream analyses:
+
+```{r}
+#It shows only one dimention:
+DimHeatmap(LVH, dims = 1, cells = 500, balanced = TRUE)
+```
+
+```{r}
+DimHeatmap(LVH, dims = 1:12, cells = 500, balanced = TRUE)
+```
+
+Determine the '**dimensionality**' of the dataset:
+
+'Elbow plot' is a heuristic method to rank principle components based on the percentage of variance explained by each one:
+
+```{r}
+ElbowPlot(LVH)
+```
+
+**Clustering the cells**; Now I apply modularity optimization techniques such as the Louvain algorithm (default) to iteratively group cells together
+
+The goal is optimizing the standard modularity function. The FindClusters() function implements this procedure, and contains a resolution parameter that sets the 'granularity' of the downstream clustering. I choose complete dimentions then I set this parameter 0.7 which returns good results for single-cell datasets.
+
+\* Optimal resolution often increases for larger datasets.
+
+```{r}
+LVH=FindNeighbors(LVH, dims = 1:20)
+```
+
+```{r}
+LVH=FindClusters(LVH,resolution = 0.5)
+```
+
+```{r}
+#Look at cluster IDs of the first 5 cells:
+head(Idents(LVH), 5)
+```
+
+#### Perform non-linear dimensional reduction (UMAP/tSNE):
+
+The goal of non-linear dimensional reduction is to learn the underlying manifold of the data in order to place similar cells together in **low-dimensional space**. Cells within the graph-based clusters determined above should co-localize on these dimension reduction plots.
+
+In this regard I used the same PCs as input to the clustering analysis.
+
+**\* reticulate** performs us to do UMAP process.
+
+```{r}
+library(reticulate)
+LVH=RunUMAP(LVH, dims = 1:20)
+```
+
+individual clusters
+
+```{r}
+DimPlot(LVH, reduction = "umap")
+```
+
+```{r}
+table(Idents(LVH))
+```
+
+```{r}
+#save the object:
+saveRDS(LVH, file = 'LVH.rds')
+```
+
+#### The final step is to give an "identity" to the clusters
+
+Finding differentially expressed features (cluster biomarkers):
+
+```{r}
+#As an example in cluster 1:
+cluster1.markers = FindMarkers(LVH, ident.1 = 1, min.pct = 0.25)
+head(cluster1.markers, n = 5)
+```
+
+```{r}
+# find all markers of cluster 2:
+cluster2.markers <- FindMarkers(LVH, ident.1 = 2, min.pct = 0.25)
+head(cluster2.markers, n = 5)
+```
+
+```{r}
+# find all markers distinguishing cluster 5 from clusters 0 and 3
+cluster5.markers <- FindMarkers(LVH, ident.1 = 5, ident.2 = c(0, 3), min.pct = 0.25)
+head(cluster5.markers, n = 5)
+```
+
+Now, finding the **markers of 'all clusters'**:
+
+-   The cell types associated with each cluster were obtained from PanglaoDB; so, I put them instead of number of each cluster:
+
+    ```{r}
+    CellType=c('Fibroblasts', 'Endothelial cells', 'Macrophages', 'Erythroid-like and erythroid precursor cells', 'Macrophages', 
+               'Endothelial cells', 'Fibroblasts','Unknown', 'Endothelial cells', 'Pericytes',
+               'Endothelial cells', 'T memory cells', 'Fibroblasts', 'Macrophages', 'Macrophages', 
+               'Unknown', 'Cardiomyocytes', 'Endothelial cells', 'B cells', 'Mesothelial cells')	
+    names(CellType) = levels(LVH)
+    LVH = RenameIdents(LVH, CellType)
+    levels(LVH)
+    ```
+
+-   Moreover I found an interesting website which usful for finding cell markers of human and mouse. I retrieved mouse cell marker, then extraced only data related to Heart tissue; then I created cell markers as a vector manually:
+
+    ```{r}
+    ALLMarker=read.table('Mouse_cell_markers.txt',  header = TRUE,  sep = '\t' )
+    HeartmmMarker= subset(ALLMarker, subset =  tissueType=='Heart' )
+    HeartmmMarker$geneSymbol
+    ```
+
+In is case, 25% of the cells are chosen with a log2 fold change = 0.25 as threshold.
+
+```{r}
+LVH.markers = FindAllMarkers(LVH, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+```
+
+```{r}
+#Top two markers of each cluster:
+Markers_top2=LVH.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+Markers_top2
+```
+
+Seurat includes several tools for **visualizing** marker expression.
+
+VlnPlot (shows expression probability distributions across clusters), and
+
+FeaturePlot (visualizes feature expression on a tSNE or PCA plot) are our most commonly used visualizations.
+
+We also suggest exploring RidgePlot, CellScatter, and DotPlot as additional methods to view your dataset.
+
+Example: "Gsn", "C2", "Csf1r"
+
+```{r}
+#As we can see in violin plot, "Gsn" could not be a marker, because, it is highly expressed in different clusters,
+#Furthermore, "C2" is highly expressed in Fibroblast cell but in this analysis, we can see that this gene is expressed in B cells.
+VlnPlot(LVH, features = c("Gsn", "C2", "Csf1r"), pt.size=0) 
+#the typical plot in articles:
+FeaturePlot(LVH, features = c("Gsn", "C2", "Csf1r"))
+```
+
+```{r}
+#The size of the dot: corresponds to the percentage of cells expressing the feature in each cluster. 
+#The color: represents the average expression level
+DotPlot(LVH, features = c("Gsn", "Itga1", "Acta1", "Col1a2", "Fabp4", "Itgam", "Lgals3", "Itga6", "Tnxb", "Ckap4", "Ccl8", "Mmp2") ) + RotatedAxis()
+```
+
+I tried to find markers manually from two data that I obtaied :
+
+1.  Markers_top2
+
+2.  HeartmmMarker
+
+    \* Moreover I got help from Cell type gene expression markers of PanglaoDB
+
+    \* I could not find any marker gene for "Erythroid-like and erythroid precursor cells"
+
+    \* Also, I could not find the type of "Unknown" cell in the cluster
+
+    ```{r}
+    Mrkr_LVH = c("Col8a1", "Rgcc", "Tnnc1", "Nrg1", "Ttn", "Higd1b",'Gpihbp1', 'Ccr5', 'Kit', "Vcam1", "Myl7", "Mmrn1", "Hand2", "Lyve1", "Itgam", "Mmp2", "Gja1", "Ednrb", "Actc1", "Alcam")
+    ```
+
+```{r}
+#Fibroblast, Endothelial, T cell
+VlnPlot(LVH, features = c("Col8a1", "Rgcc","Tnnc1"), pt.size=0) 
+#Unknown, Unknown, Pericyt
+VlnPlot(LVH, features = c("Nrg1","Ttn", "Higd1b"), pt.size=0)
+#Unknown, B cell, Mesothelial
+VlnPlot(LVH, features = c("Vcam1", "Myl7", "Mmrn1"), pt.size=0)
+#Unknown, Mesothelial, Cardiomyocyte
+VlnPlot(LVH, features = c( "Hand2", "Lyve1", "Itgam"), pt.size=0)
+#Fibroblast, B cell, Pericyte
+VlnPlot(LVH, features = c( "Mmp2","Gja1", "Ednrb"), pt.size=0)
+#T memmory cell, Cardiomyocyte, Macrophage
+VlnPlot(LVH, features = c( "Actc1", "Alcam", "Syk"), pt.size=0)
+#Endothelial, Macrophage, Erythroid-like and erythroid precursor cells
+VlnPlot(LVH, features = c('Gpihbp1', 'Ccr5', 'Kit'), pt.size=0, slot = "counts", log = T) 
+```
+
+```{r}
+DotPlot(LVH, features = Mrkr_LVH ) + RotatedAxis()
+```
+
+```{r}
+DoHeatmap(LVH, features = Mrkr_LVH) + NoLegend()
+```
+
+Generates an expression heatmap for given cells and features. In this case, first we are plotting the top marker for each cluster. then top 10 markers in each cluster:
+
+```{r}
+top1 = LVH.markers %>% group_by(cluster) %>% top_n(n = 1, wt = avg_log2FC)
+top1
+DoHeatmap(LVH, features = top1$gene) + NoLegend()
+```
+
+```{r}
+top10 = LVH.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+DoHeatmap(LVH, features = top10$gene) + NoLegend()
+```
+
+Now, we have the markers and the cell types associated with each cluster were already known.
+
+```{r}
+DimPlot(LVH, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+##### Additional:
+
+I tried to find the type of cluster of each marker without knowing cell types:
+
+```{r}
+#I go back before do clustering:
+#saveRDS(LVH, file = 'LVH.rds')
+#LVH.markers = FindAllMarkers(LVH, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+#Mrkr_LVH = c("Col8a1", "Rgcc", "Tnnc1", "Nrg1", "Ttn", "Higd1b", "Vcam1", "Myl7", "Mmrn1", "Hand2", "Lyve1", "Itgam", "Mmp2", "Gja1", "Ednrb", "Actc1", "Alcam")
+
+#VlnPlot(LVH, features = c("Col8a1", "Rgcc","Tnnc1"), pt.size=0) 
+#Fibroblast, Endothelial, T cell
+
+#VlnPlot(LVH, features = c("Nrg1","Ttn", "Higd1b"), pt.size=0)
+#Unknown, Unknown, Pericyt
+
+#VlnPlot(LVH, features = c("Vcam1", "Myl7", "Mmrn1"), pt.size=0)
+#Unknown, B cell, Mesothelial
+
+#VlnPlot(LVH, features = c( "Hand2", "Lyve1", "Itgam"), pt.size=0)       #Lyve1   Itgam
+#Unknown, Mesothelial, Cardiomyocyte
+
+#VlnPlot(LVH, features = c( "Mmp2","Gja1", "Ednrb"), pt.size=0)
+#Fibroblast, B cell, Pericyte
+
+#VlnPlot(LVH, features = c( "Actc1", "Alcam", "Syk"), pt.size=0)
+#T memmory cell, Cardiomyocyte, Macrophage
+
+#DotPlot(LVH, features = Mrkr_LVH ) + RotatedAxis()
+#DoHeatmap(LVH, features = Mrkr_LVH) + NoLegend()
+
+#cluster3.markers <- FindMarkers(LVH, ident.1 = 3, min.pct = 0.25)
+#head(cluster3.markers, n = 10)
+
+#cluster4.markers <- FindMarkers(LVH, ident.1 = 4, min.pct = 0.25)
+#head(cluster4.markers, n = 10)
+
+#cluster8.markers <- FindMarkers(LVH, ident.1 = 8, min.pct = 0.25)
+#head(cluster8.markers, n = 10)
+
+#cluster13.markers <- FindMarkers(LVH, ident.1 = 13, min.pct = 0.25)
+#head(cluster13.markers, n = 10)
+
+#cluster14.markers <- FindMarkers(LVH, ident.1 = 14, min.pct = 0.25)
+#head(cluster14.markers, n = 10)
+```
+
+Materials and tools that have been used in this project are available here:
+
+```{r}
+sessionInfo()
+```
+
+#### **References:**
+
+1.  Seurat V4;
+
+    <https://satijalab.org/seurat/>
+
+2.  Giulio Pavesi; Seurat example on 10x Data (2021 updated);
+
+    <http://159.149.160.56/Transcriptomics/seurat.html>
+
+3.  CellMarker: a manually curated resource of cell markers in human and mouse
+
+    DOI: [10.1093/nar/gky900](https://doi.org/10.1093/nar/gky900)
+
+    <http://biocc.hrbmu.edu.cn/CellMarker/>
+
+4.  Tabula Muris
+
+    <https://tabula-muris.ds.czbiohub.org/>
+
+5.  PanglaoDB
+
+    <https://panglaodb.se/index.html>
